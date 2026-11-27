@@ -15,8 +15,9 @@ natively. A third-party package is imported only when an estimator, a parameter
 grid or a native reference is built. ``ensemble_meta_case`` and
 ``ensemble_passthrough_case`` check ``tsforecast.ensemble.OnlineAggregator`` with the
 same battery (no third-party package, no native reference); ``foundation_drift_case``
-(fake backend, offline) and ``foundation_chronos_case`` (``autogluon/chronos-2-small``)
-check ``FoundationModelAdapter``.
+(fake backend, offline), ``foundation_chronos_case`` (``autogluon/chronos-2-small``),
+``foundation_timestral_case`` (``mistralai/Timestral-5M``) and ``foundation_t0_case``
+(``theforecastingcompany/t0-gamma``) check ``FoundationModelAdapter``.
 """
 from functools import partial
 from typing import Callable, Dict, Tuple
@@ -542,6 +543,9 @@ DRIFT, DRIFT_COEF = 0.5, 0.25
 # Plus petit modèle Chronos-2 et plus petit modèle Chronos-Bolt
 CHRONOS_2_SMALL = 'autogluon/chronos-2-small'
 CHRONOS_BOLT_TINY = 'amazon/chronos-bolt-tiny'
+# Plus petit modèle Timestral et modèle t0 comparés à leur paquet
+TIMESTRAL_5M = 'mistralai/Timestral-5M'
+T0_GAMMA = 'theforecastingcompany/t0-gamma'
 # Paramètres refusés au fit, quel que soit le backend
 _FOUNDATION_INVALID_PARAMS = (
     {'quantile': 1.5},
@@ -599,4 +603,52 @@ def foundation_chronos_case() -> AdapterCase:
         native_reference=native.chronos_reference(CHRONOS_2_SMALL),
         rtol=1e-5,
         atol=1e-6,
+    )
+
+
+# Cas de contrat de Timestral (téléchargement du modèle)
+def foundation_timestral_case() -> AdapterCase:
+    """``FoundationModelAdapter`` around ``mistralai/Timestral-5M``, with known covariates.
+
+    Returns:
+        Case of the real model; native reference calling ``TimestralForecaster``
+        directly; float32 tolerances of padded batches.
+    """
+    return AdapterCase(
+        make_estimator=lambda: FoundationModelAdapter(TIMESTRAL_5M),
+        wrapped_param='model_id',
+        param_grid={'context_length': [12, None]},
+        package='timestral',
+        extra='adapters-timestral',
+        local_model=True,
+        row_regressor=False,
+        invalid_params=_FOUNDATION_INVALID_PARAMS + ({'quantile': 0.001},),
+        frame_method='predict_quantiles',
+        native_reference=native.timestral_reference(TIMESTRAL_5M),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+# Cas de contrat de t0 (téléchargement du modèle)
+def foundation_t0_case() -> AdapterCase:
+    """``FoundationModelAdapter`` around ``theforecastingcompany/t0-gamma``, with known covariates.
+
+    Returns:
+        Case of the real model; native reference calling ``T0Forecaster``
+        directly; float32 tolerances of padded batches.
+    """
+    return AdapterCase(
+        make_estimator=lambda: FoundationModelAdapter(T0_GAMMA),
+        wrapped_param='model_id',
+        param_grid={'context_length': [12, None]},
+        package='t0',
+        extra='adapters-t0',
+        local_model=True,
+        row_regressor=False,
+        invalid_params=_FOUNDATION_INVALID_PARAMS,
+        frame_method='predict_quantiles',
+        native_reference=native.t0_reference(T0_GAMMA),
+        rtol=1e-4,
+        atol=1e-4,
     )

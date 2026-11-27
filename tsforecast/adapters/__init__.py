@@ -5,14 +5,15 @@ forecasting models), ``HierarchicalForecastAdapter`` (hierarchicalforecast
 reconciliation, with the conversion functions ``stack_nodes`` and
 ``unstack_nodes`` between wide and long hierarchical data and the
 cross-validation folds ``period_splits`` of temporal hierarchies) and
-``FoundationModelAdapter`` (pretrained foundation models such as Chronos, with
-``CallableBackend``, ``register_backend`` and ``clear_model_cache``). Importing this
+``FoundationModelAdapter`` (pretrained foundation models such as Chronos,
+Timestral and t0, with ``CallableBackend``, ``register_backend`` and
+``clear_model_cache``). Importing this
 package never imports a third-party package: each adapter imports its package
 inside its methods and, when it is missing, raises an ``ImportError`` naming the
 extra to install
 (``adapters-sktime``, ``adapters-darts``, ``adapters-hierarchical``,
-``adapters-chronos``, ``adapters-light`` for every adapter without foundation
-model, or ``adapters-all``).
+``adapters-chronos``, ``adapters-timestral``, ``adapters-t0``, ``adapters-light``
+for every adapter without foundation model, or ``adapters-all``).
 """
 from tsforecast.adapters.darts import DartsAdapter
 from tsforecast.adapters.foundation import (

@@ -32,10 +32,27 @@ def fake(isolated_registry):
 class TestRegistration:
     """Registered backends and their prefixes."""
 
-    def test_builtin_chronos(self):
+    def test_builtin_backends(self):
         from tsforecast.adapters.foundation import available_backends
 
-        assert available_backends()['chronos'] == ('amazon/chronos', 'autogluon/chronos')
+        backends = available_backends()
+        assert backends['chronos'] == ('amazon/chronos', 'autogluon/chronos')
+        assert backends['timestral'] == ('mistralai/timestral-',)
+        assert backends['t0'] == ('theforecastingcompany/t0-',)
+
+    @pytest.mark.parametrize(
+        'model_id, name, extra',
+        [
+            ('amazon/chronos-2', 'chronos', 'adapters-chronos'),
+            ('mistralai/Timestral-209M', 'timestral', 'adapters-timestral'),
+            ('theforecastingcompany/t0-gamma', 't0', 'adapters-t0'),
+        ],
+    )
+    def test_builtin_model_ids(self, model_id, name, extra):
+        from tsforecast.adapters.foundation.registry import resolve_backend
+
+        spec = resolve_backend(model_id)
+        assert (spec.name, spec.package, spec.extra) == (name, name, extra)
 
     def test_register_and_replace(self, isolated_registry, fake):
         assert isolated_registry.available_backends()['fake'] == ('fake-org/',)

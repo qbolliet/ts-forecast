@@ -16,6 +16,7 @@ import numpy as np
 
 # tsforecast
 from tsforecast.adapters._base import import_optional
+from tsforecast.adapters.foundation.backends._tensors import to_numpy, to_tensor
 from tsforecast.adapters.foundation.protocol import BackendCapabilities, ForecastRequest, ForecastResult
 
 # Extra installant chronos-forecasting
@@ -26,22 +27,6 @@ CHRONOS_PREFIXES: Tuple[str, ...] = ("amazon/chronos", "autogluon/chronos")
 _SAMPLING_PREFIXES: Tuple[str, ...] = ("amazon/chronos-t5", "autogluon/chronos-t5")
 # Familles de pipelines prises en charge
 _CHRONOS_2, _BOLT = "chronos-2", "chronos-bolt"
-
-
-# Fonction auxiliaire de conversion d'un tenseur en tableau numpy
-def _to_numpy(values: Any) -> np.ndarray:
-    """Convert a tensor (or an array) returned by chronos to a ``float64`` array.
-
-    Args:
-        values: Torch tensor on any device, or array-like.
-
-    Returns:
-        A ``float64`` numpy array.
-    """
-    # Tenseur torch : détaché et ramené sur le processeur
-    if hasattr(values, "detach"):
-        values = values.detach().cpu().numpy()
-    return np.asarray(values, dtype=np.float64)
 
 
 # Backend des modèles Chronos
@@ -156,14 +141,14 @@ class ChronosBackend:
                 quantile_levels=levels,
                 **kwargs,
             )
-            return ForecastResult(np.stack([_to_numpy(values) for values in quantiles]))
+            return ForecastResult(np.stack([to_numpy(values) for values in quantiles]))
         # Chronos-Bolt : tenseurs à une dimension, sortie (n_séries, H, Q)
         torch = import_optional("torch", _EXTRA)
-        inputs = [torch.as_tensor(np.array(context[0]), dtype=torch.float32) for context in request.context]
+        inputs = [to_tensor(torch, context[0]) for context in request.context]
         quantiles, _ = self.pipeline.predict_quantiles(
             inputs, prediction_length=request.prediction_length, quantile_levels=levels, **kwargs
         )
-        return ForecastResult(_to_numpy(quantiles)[:, None])
+        return ForecastResult(to_numpy(quantiles)[:, None])
 
 
 # Fonction de chargement d'un modèle Chronos

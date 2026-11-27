@@ -37,12 +37,21 @@ adapters-hierarchical = [
 adapters-chronos = [
     "chronos-forecasting>=2.3.2,<3",
 ]
+# Modèles de fondation Timestral (code Apache-2.0 ; poids sous licence « Modified MIT » restreinte selon
+# le chiffre d'affaires) : paquet absent de PyPI, dépendance Git figée sur le commit de la version 1.0.0
+adapters-timestral = [
+    "timestral @ git+https://github.com/mistralai/timestral.git@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
+]
+# Modèles de fondation t0 (Apache-2.0), exécution torch
+adapters-t0 = [
+    "tfc-t0[torch]>=0.6.1,<1",
+]
 # Adapters sans modèle de fondation : aucune dépendance à torch
 adapters-light = [
     "ts-forecast[adapters-sktime,adapters-darts,adapters-hierarchical]",
 ]
 adapters-all = [
-    "ts-forecast[adapters-light,adapters-chronos]",
+    "ts-forecast[adapters-light,adapters-chronos,adapters-timestral,adapters-t0]",
 ]
 
 [dependency-groups]
@@ -74,6 +83,11 @@ default-groups = [
     "dev",
     "docs",
 ]
+
+[tool.hatch.metadata]
+# Références directes (dépendance Git de l'extra adapters-timestral) admises dans les métadonnées ;
+# PyPI refuse la publication d'un paquet qui en contient
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["tsforecast"]

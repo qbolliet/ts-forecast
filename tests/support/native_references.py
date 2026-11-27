@@ -8,13 +8,16 @@ regression for the row-wise darts models, ``reconcile`` per copy for
 hierarchicalforecast. ``temporal_reference`` and ``cross_temporal_reference``
 reconcile complete calendar years with ``aggregate_temporal`` and
 ``reconcile(temporal=True)``, the cross-temporal one in two chained passes.
-``drift_reference`` computes the fake foundation backend by hand and
-``chronos_reference`` calls ``predict_quantiles`` of a Chronos pipeline directly,
-one ``k``-step forecast per test row.
+``drift_reference`` computes the fake foundation backend by hand;
+``chronos_reference``, ``timestral_reference`` and ``t0_reference`` call
+``predict_quantiles`` of a Chronos pipeline, ``TimestralForecaster.forecast`` and
+``T0Forecaster.predict`` directly, one ``k``-step forecast per test row
+(``foundation_quantiles``).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -588,6 +591,42 @@ def chronos_pipeline(model_id: str) -> Any:
     return _CHRONOS_PIPELINES[model_id]
 
 
+# Chargement mis en cache d'un modèle Timestral, sans passer par tsforecast
+_TIMESTRAL_FORECASTERS: Dict[str, Any] = {}
+
+
+def timestral_forecaster(model_id: str) -> Any:
+    """Load a ``TimestralForecaster`` on CPU with timestral alone, once per model id."""
+    if model_id not in _TIMESTRAL_FORECASTERS:
+        from timestral import TimestralForecaster
+
+        _TIMESTRAL_FORECASTERS[model_id] = TimestralForecaster.from_pretrained(model_id, device='cpu')
+    return _TIMESTRAL_FORECASTERS[model_id]
+
+
+# Chargement mis en cache d'un modèle t0, sans passer par tsforecast
+_T0_FORECASTERS: Dict[str, Any] = {}
+
+
+def t0_forecaster(model_id: str) -> Any:
+    """Load a ``T0Forecaster`` on CPU with tfc-t0 alone, once per model id."""
+    if model_id not in _T0_FORECASTERS:
+        from t0 import T0Forecaster
+
+        _T0_FORECASTERS[model_id] = T0Forecaster.from_pretrained(model_id).eval()
+    return _T0_FORECASTERS[model_id]
+
+
+# Fonction auxiliaire des covariables connues des k pas d'une prévision
+def _future_values(X_future: Dict[int, np.ndarray], k: int, n_columns: int) -> np.ndarray:
+    """Lay the features of the test rows on the steps ``1..k``, ``NaN`` on the other steps."""
+    future = np.full((k, n_columns), np.nan)
+    for step, values in X_future.items():
+        if step <= k:
+            future[step - 1] = values
+    return future
+
+
 # Prévision native des quantiles d'une ligne par Chronos
 def chronos_row_quantiles(
     pipeline: Any,
@@ -626,25 +665,165 @@ def chronos_row_quantiles(
     item: Dict[str, Any] = {'target': y_context}
     # Covariables connues : passé, puis lignes de test des pas 1..k (NaN ailleurs)
     if X_context is not None:
-        future = np.full((k, X_context.shape[1]), np.nan)
-        for step, values in X_future.items():
-            if step <= k:
-                future[step - 1] = values
+        future = _future_values(X_future, k, X_context.shape[1])
         item['past_covariates'] = {name: X_context[:, j] for j, name in enumerate(columns)}
         item['future_covariates'] = {name: future[:, j] for j, name in enumerate(columns)}
     quantiles, _ = pipeline.predict_quantiles([item], prediction_length=k, quantile_levels=list(levels))
     return quantiles[0][0, k - 1, :].numpy().astype(float)
 
 
+# Prévision native des quantiles d'une ligne par Timestral
+def timestral_row_quantiles(
+    forecaster: Any,
+    y_context: np.ndarray,
+    X_context: Optional[np.ndarray],
+    X_future: Optional[Dict[int, np.ndarray]],
+    k: int,
+    levels: Sequence[float],
+    columns: Sequence[str] = (),
+) -> np.ndarray:
+    """Quantiles of the step ``k`` of a ``k``-step ``TimestralForecaster.forecast`` of one series.
+
+    Args:
+        forecaster: ``TimestralForecaster``.
+        y_context: Training target, oldest first.
+        X_context: Training features ``(n_steps, n_columns)``, or None.
+        X_future: Step (1-based) -> features of the test row at that step, for
+            known covariates; None when the features are known over the context
+            only.
+        k: Number of steps of the forecast.
+        levels: Quantile levels of the model.
+        columns: Unused (the model reads covariates by position).
+
+    Returns:
+        The quantiles of the last step, one per level.
+    """
+    covariates: Dict[str, np.ndarray] = {}
+    if X_context is not None:
+        # Covariables passées : contexte seul ; connues : contexte puis pas 1..k
+        if X_future is None:
+            covariates['past_covariates'] = np.array(X_context.T[None])
+        else:
+            future = _future_values(X_future, k, X_context.shape[1])
+            covariates['known_covariates'] = np.concatenate([X_context, future]).T[None]
+    forecast = forecaster.forecast(np.array(y_context)[None, None], k, **covariates)
+    return np.array([float(forecast.quantile(level)[0, 0, k - 1]) for level in levels])
+
+
+# Prévision native des quantiles d'une ligne par t0
+def t0_row_quantiles(
+    forecaster: Any,
+    y_context: np.ndarray,
+    X_context: Optional[np.ndarray],
+    X_future: Optional[Dict[int, np.ndarray]],
+    k: int,
+    levels: Sequence[float],
+    columns: Sequence[str] = (),
+) -> np.ndarray:
+    """Quantiles of the step ``k`` of a ``k``-step ``T0Forecaster.predict`` of one series.
+
+    Args:
+        forecaster: ``T0Forecaster``.
+        y_context: Training target, oldest first.
+        X_context: Training features ``(n_steps, n_columns)``, or None.
+        X_future: Step (1-based) -> features of the test row at that step, for
+            ``future_covariates``; None when the features are known over the
+            context only, passed as further variates of the context.
+        k: Number of steps of the forecast.
+        levels: Quantile levels, increasing.
+        columns: Unused (the model reads covariates by position).
+
+    Returns:
+        The quantiles of the last step, one per level.
+    """
+    context = np.array(y_context, dtype=np.float32)[None]
+    future_covariates = None
+    if X_context is not None:
+        # Covariables passées : variables du contexte, la cible en premier
+        if X_future is None:
+            context = np.concatenate([context, X_context.T.astype(np.float32)])[None]
+        else:
+            future = _future_values(X_future, k, X_context.shape[1])
+            future_covariates = np.concatenate([X_context, future]).T[None].astype(np.float32)
+    quantiles = forecaster.predict(
+        context, k, quantile_levels=list(levels), future_covariates=future_covariates
+    ).quantiles.numpy()
+    # Contexte à plusieurs variables : prévision de la cible seule
+    if context.ndim == 3:
+        quantiles = quantiles[:, 0]
+    return quantiles[0, k - 1].astype(float)
+
+
+# Quantiles natifs de toutes les lignes de test d'un modèle de fondation
+def foundation_quantiles(
+    row_quantiles: Callable[..., np.ndarray],
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    fh: Sequence[int],
+    levels: Sequence[float],
+    covariates: Optional[str] = 'known',
+) -> np.ndarray:
+    """Quantiles of every test row from one native ``k``-step forecast per row and entity.
+
+    A test row ``k`` steps after training is the last step of a ``k``-step
+    forecast of its entity's training target. With ``covariates='known'``, the
+    features of the training rows are past values and those of the test rows of
+    its entity at most ``k`` steps after training are known future values; with
+    ``'past'``, only the former are passed.
+
+    Args:
+        row_quantiles: Function ``(y_context, X_context, X_future, k, levels,
+            columns)`` calling the package on one series.
+        X_train: Training features.
+        y_train: Training target.
+        X_test: Test features.
+        fh: Relative horizon of the sorted test dates.
+        levels: Quantile levels.
+        covariates: ``'known'``, ``'past'`` or None.
+
+    Returns:
+        Array ``(n_test_rows, n_levels)`` in the row order of ``X_test``.
+    """
+    result = np.full((len(X_test), len(levels)), np.nan)
+    train_rows = _entity_rows(y_train)
+    columns = [str(column) for column in X_train.columns]
+    # Parcours des entités du test
+    for key, rows in _entity_rows(X_test).items():
+        y_context = y_train.to_numpy()[train_rows[key]]
+        X_context = None if covariates is None else X_train.to_numpy()[train_rows[key]]
+        rows, steps = _test_steps(X_test, rows, fh)
+        X_future = dict(zip(steps.tolist(), X_test.to_numpy()[rows])) if covariates == 'known' else None
+        # Une prévision de k pas par ligne de test
+        for row, k in zip(rows, steps.tolist()):
+            result[row] = row_quantiles(y_context, X_context, X_future, k, levels, columns)
+    return result
+
+
+# Fabrique de la référence d'un modèle de fondation appelé directement
+def _foundation_reference(
+    load: Callable[[str], Any],
+    row_quantiles: Callable[..., np.ndarray],
+    model_id: str,
+    quantile: float,
+    covariates: bool,
+) -> NativeReference:
+    """Reference of a foundation model: one native forecast per test row and entity."""
+
+    # Référence du modèle chargé au premier appel
+    def reference(X_train, y_train, X_test, fh):
+        rows = partial(row_quantiles, load(model_id))
+        mode = 'known' if covariates else None
+        return foundation_quantiles(rows, X_train, y_train, X_test, fh, [quantile], mode)[:, 0]
+
+    return reference
+
+
 # Fabrique de la référence d'un modèle Chronos appelé directement
 def chronos_reference(model_id: str, quantile: float = 0.5, covariates: bool = True) -> NativeReference:
     """Reference of a Chronos model: one ``predict_quantiles`` call per test row and entity.
 
-    A test row ``k`` steps after training is the last step of a ``k``-step
-    forecast of its entity's training target, with, for Chronos-2 and
-    ``covariates``, the features of the training rows as past values and those
-    of the test rows of its entity at most ``k`` steps after training as known
-    future values.
+    See :func:`foundation_quantiles`; the covariates are those of Chronos-2.
 
     Args:
         model_id: Hugging Face id of the model.
@@ -654,22 +833,38 @@ def chronos_reference(model_id: str, quantile: float = 0.5, covariates: bool = T
     Returns:
         Native reference.
     """
+    return _foundation_reference(chronos_pipeline, chronos_row_quantiles, model_id, quantile, covariates)
 
-    # Référence du modèle Chronos
-    def reference(X_train, y_train, X_test, fh):
-        pipeline = chronos_pipeline(model_id)
-        result = np.full(len(X_test), np.nan)
-        train_rows = _entity_rows(y_train)
-        columns = [str(column) for column in X_train.columns]
-        # Parcours des entités du test
-        for key, rows in _entity_rows(X_test).items():
-            y_context = y_train.to_numpy()[train_rows[key]]
-            X_context = X_train.to_numpy()[train_rows[key]] if covariates else None
-            rows, steps = _test_steps(X_test, rows, fh)
-            X_future = dict(zip(steps.tolist(), X_test.to_numpy()[rows])) if covariates else None
-            # Une prévision de k pas par ligne de test
-            for row, k in zip(rows, steps.tolist()):
-                result[row] = chronos_row_quantiles(pipeline, y_context, X_context, X_future, k, [quantile], columns)[0]
-        return result
 
-    return reference
+# Fabrique de la référence d'un modèle Timestral appelé directement
+def timestral_reference(model_id: str, quantile: float = 0.5, covariates: bool = True) -> NativeReference:
+    """Reference of a Timestral model: one ``forecast`` call per test row and entity.
+
+    See :func:`foundation_quantiles`.
+
+    Args:
+        model_id: Hugging Face id of the model.
+        quantile: Level returned, one of the model.
+        covariates: Whether the features are passed as known covariates.
+
+    Returns:
+        Native reference.
+    """
+    return _foundation_reference(timestral_forecaster, timestral_row_quantiles, model_id, quantile, covariates)
+
+
+# Fabrique de la référence d'un modèle t0 appelé directement
+def t0_reference(model_id: str, quantile: float = 0.5, covariates: bool = True) -> NativeReference:
+    """Reference of a t0 model: one ``predict`` call per test row and entity.
+
+    See :func:`foundation_quantiles`.
+
+    Args:
+        model_id: Hugging Face id of the model.
+        quantile: Level returned.
+        covariates: Whether the features are passed as known covariates.
+
+    Returns:
+        Native reference.
+    """
+    return _foundation_reference(t0_forecaster, t0_row_quantiles, model_id, quantile, covariates)

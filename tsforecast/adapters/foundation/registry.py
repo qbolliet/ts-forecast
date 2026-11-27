@@ -4,8 +4,9 @@
 serves, ``available_backends`` lists them, ``resolve_backend`` finds the backend of
 a model id, ``load_backend`` loads a model once per process (key: backend, model
 id, device, loading options) and ``clear_model_cache`` releases the loaded models.
-The ``chronos`` backend (``amazon/chronos-*``, ``autogluon/chronos-*``) is registered
-on import, without importing chronos.
+The ``chronos`` (``amazon/chronos-*``, ``autogluon/chronos-*``), ``timestral``
+(``mistralai/Timestral-*``) and ``t0`` (``theforecastingcompany/t0-*``) backends are
+registered on import, without importing their packages.
 """
 # Importation des modules
 # Modules de base
@@ -16,6 +17,8 @@ from typing import Any, Callable, Dict, Hashable, Mapping, Optional, Tuple
 # tsforecast
 from tsforecast.adapters._base import import_optional
 from tsforecast.adapters.foundation.backends.chronos import CHRONOS_PREFIXES, load_chronos
+from tsforecast.adapters.foundation.backends.t0 import T0_PREFIXES, load_t0
+from tsforecast.adapters.foundation.backends.timestral import TIMESTRAL_PREFIXES, load_timestral
 from tsforecast.adapters.foundation.protocol import BackendCapabilities, ForecastBackend
 
 # Signature d'une fonction de chargement : (model_id, *, device, **options) -> modèle chargé
@@ -264,4 +267,18 @@ register_backend(
     prefixes=CHRONOS_PREFIXES,
     package="chronos",
     extra="adapters-chronos",
+)
+register_backend(
+    "timestral",
+    load_timestral,
+    prefixes=TIMESTRAL_PREFIXES,
+    package="timestral",
+    extra="adapters-timestral",
+)
+register_backend(
+    "t0",
+    load_t0,
+    prefixes=T0_PREFIXES,
+    package="t0",
+    extra="adapters-t0",
 )

@@ -3,9 +3,9 @@
 A foundation model learns nothing at fit: the adapter stores the target history
 of each entity (its context) and, at predict, forecasts each row of ``X`` from the
 last training date of its entity, the number of steps being read from the index.
-The model is reached through a backend (``chronos``, a ``CallableBackend``, or any
-registered backend), loaded once per process; quantile forecasts are available
-through ``predict_quantiles``.
+The model is reached through a backend (``chronos``, ``timestral``, ``t0``, a
+``CallableBackend``, or any registered backend), loaded once per process; quantile
+forecasts are available through ``predict_quantiles``.
 """
 # Importation des modules
 # Modules de base
@@ -129,7 +129,11 @@ class FoundationModelAdapter(RegressorMixin, BaseEstimator):
     ``clone`` or ``pickle``. With ``n_jobs > 1``, each worker process loads its
     own copy: keep ``n_jobs=1``, the model already uses several threads.
 
-    Licences: Chronos models and chronos-forecasting are Apache-2.0.
+    Licences: Chronos models and chronos-forecasting are Apache-2.0, as are t0
+    models and tfc-t0. The timestral package is Apache-2.0, but the Timestral
+    weights are under a Modified MIT licence that grants no right to a user whose
+    company (or employer) had a global consolidated monthly revenue above USD 20
+    million in the preceding month.
 
     Args:
         model_id: Model id or local path of a registered backend; None with a
@@ -148,11 +152,16 @@ class FoundationModelAdapter(RegressorMixin, BaseEstimator):
         device: Device of the model (``'cpu'``, ``'cuda'``...), for a
             registered backend.
         batch_size: Largest number of series per call of the model, or None.
-        backend_kwargs: Loading options of a registered backend (Chronos:
-            ``revision``, ``dtype``...); hashable values.
+        backend_kwargs: Loading options of a registered backend (``revision``
+            for all three; ``dtype`` for Chronos and t0, ``max_context`` for
+            Timestral); hashable values.
         predict_kwargs: Options passed to the backend at each call (Chronos:
             ``batch_size``, ``cross_learning``; with ``cross_learning=True``,
-            a forecast depends on the other series of its batch).
+            a forecast depends on the other series of its batch. Timestral:
+            ``symmetric_averaging``, ``clip_nonnegative``, both on by default.
+            t0: ``symmetric_averaging``, ``clip_nonnegative``, ``snap_integers``,
+            ``trim_leading_missing``, off by default, and
+            ``drop_constant_covariates``, on by default).
 
     Attributes:
         backend_name_: Name of the registered backend, or class name of the

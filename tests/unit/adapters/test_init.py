@@ -18,7 +18,10 @@ import tsforecast.adapters
 # Racine du dépôt, pour importer tsforecast depuis un interpréteur neuf
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # Paquets tiers optionnels des adapters
-OPTIONAL_PACKAGES = ('sktime', 'darts', 'hierarchicalforecast', 'utilsforecast', 'chronos', 'torch', 'transformers')
+OPTIONAL_PACKAGES = (
+    'sktime', 'darts', 'hierarchicalforecast', 'utilsforecast', 'chronos', 'timestral', 't0', 'torch',
+    'transformers',
+)
 
 # Chercheur d'imports rendant les paquets optionnels introuvables, comme s'ils n'étaient pas installés
 BLOCKER = textwrap.dedent(f'''
@@ -81,7 +84,9 @@ def test_import_without_loading_or_requiring_optional_packages():
         adapters.SktimeAdapter(forecaster=None)
         darts = adapters.DartsAdapter(model=None)
         hierarchical = adapters.HierarchicalForecastAdapter({'a': ['b']})
-        foundation = adapters.FoundationModelAdapter('amazon/chronos-2')
+        chronos = adapters.FoundationModelAdapter('amazon/chronos-2')
+        timestral = adapters.FoundationModelAdapter('mistralai/Timestral-5M')
+        t0 = adapters.FoundationModelAdapter('theforecastingcompany/t0-gamma')
 
         dates = pd.date_range('2024-01-01', periods=3, freq='MS')
         X = pd.DataFrame({'x': [1.0, 2.0, 3.0]}, index=dates)
@@ -91,7 +96,9 @@ def test_import_without_loading_or_requiring_optional_packages():
         for estimator, extra in [
             (darts, 'adapters-darts'),
             (hierarchical, 'adapters-hierarchical'),
-            (foundation, 'adapters-chronos'),
+            (chronos, 'adapters-chronos'),
+            (timestral, 'adapters-timestral'),
+            (t0, 'adapters-t0'),
         ]:
             try:
                 estimator.fit(X, y)
