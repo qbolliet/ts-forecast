@@ -10,6 +10,7 @@ This package provides sklearn-compatible tools for:
 Modules:
     crossvals: Cross-validation splitters that respect temporal ordering.
     delays: Publication-delay inference and transformers.
+    ensemble: Online aggregation of expert forecasts (BOA, MLpol).
     imputation: Mixed-frequency imputation with provenance tracking.
     xy: Pipeline and mixin for transformers that transform X and y jointly.
     panel: Per-entity transformer wrapper and panel utilities.

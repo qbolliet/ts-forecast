@@ -17,7 +17,7 @@ import tsforecast.adapters
 # Racine du dépôt, pour importer tsforecast depuis un interpréteur neuf
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # Paquets tiers optionnels des adapters
-OPTIONAL_PACKAGES = ('sktime', 'darts', 'hierarchicalforecast', 'utilsforecast', 'opera')
+OPTIONAL_PACKAGES = ('sktime', 'darts', 'hierarchicalforecast', 'utilsforecast')
 
 # Chercheur d'imports rendant les paquets optionnels introuvables, comme s'ils n'étaient pas installés
 BLOCKER = textwrap.dedent(f'''
@@ -51,7 +51,6 @@ def test_exported_names():
     assert sorted(tsforecast.adapters.__all__) == [
         'DartsAdapter',
         'HierarchicalForecastAdapter',
-        'OperaAdapter',
         'SktimeAdapter',
         'period_splits',
         'stack_nodes',
@@ -76,7 +75,6 @@ def test_import_without_loading_or_requiring_optional_packages():
         # Paquets optionnels désormais introuvables : construction, puis fit refusé avec l'extra
         adapters.SktimeAdapter(forecaster=None)
         darts = adapters.DartsAdapter(model=None)
-        opera = adapters.OperaAdapter()
         hierarchical = adapters.HierarchicalForecastAdapter({'a': ['b']})
 
         dates = pd.date_range('2024-01-01', periods=3, freq='MS')
@@ -86,7 +84,6 @@ def test_import_without_loading_or_requiring_optional_packages():
         assert adapters.stack_nodes(X).index.names == ['node', None]
         for estimator, extra in [
             (darts, 'adapters-darts'),
-            (opera, 'adapters-opera'),
             (hierarchical, 'adapters-hierarchical'),
         ]:
             try:

@@ -13,7 +13,6 @@ from importlib.util import find_spec
 _ADAPTER_PACKAGES: dict[str, str] = {
     "tsforecast/adapters/darts.py": "darts",
     "tsforecast/adapters/hierarchicalforecast/adapter.py": "hierarchicalforecast",
-    "tsforecast/adapters/opera.py": "opera",
     "tsforecast/adapters/sktime.py": "sktime",
 }
 

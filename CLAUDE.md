@@ -20,6 +20,7 @@ tsforecast/
 ├── base/          # Classes de base des transformateurs temporels
 ├── crossvals/     # Validation croisée respectant l'ordre temporel
 ├── delays/        # Délais de publication (inférence, application, inversion)
+├── ensemble/      # Agrégation d'experts en ligne (BOA, MLpol) : OnlineAggregator
 ├── imputation/    # Imputation multi-fréquences (HighFrequencyImputer), _components/, _engine/
 ├── panel/         # Transformations par entité + utilitaires panel
 ├── xy/            # Pipeline et mixin pour transformateurs (X, y)
@@ -42,6 +43,28 @@ temporels (`transformers.py`) :
 
 Tous les splitters suivent le contrat sklearn (`split()`, `get_n_splits()`) et
 sont donc utilisables directement avec `sklearn.model_selection.cross_validate`.
+
+### `tsforecast/ensemble/`
+Agrégation en ligne de prévisions d'experts, sans dépendance tierce (numpy, pandas, sklearn) :
+- `_algorithms.py` : noyau pur, numpy seul — `Loss` / `make_loss` (`'mse'`, `'mae'`, `'pinball'`,
+  ou perte et gradient fournis), `excess_losses` (excès de perte de chaque expert sur le mélange
+  d'un tour, linéarisé ou non, moyenné sur les lignes du tour), états figés `BOAState` / `MLpolState`
+  et fonctions pures `init` / `weights` / `update` du registre `ALGORITHMS`, `run` (séquence de tours) ;
+  BOA suit la procédure adaptative de Wintenberger (2017), MLpol celle de Gaillard, Stoltz et van Erven
+  (2014) avec un taux invariant d'échelle (inverse parti de 0, croissance de l'étendue des regrets)
+- `online.py` : `OnlineAggregator(experts, aggregation=, loss=, loss_gradient=, quantile=,
+  init_weights=, pooling=, cv=, n_jobs=)`, régresseur sklearn :
+  - `experts` = liste `(nom, estimateur)` (méta-estimateur : prévisions **hors échantillon** des experts
+    par plis internes — `cv` entier = derniers blocs de `n_dates // (cv + 1)` dates communes, ou
+    splitter sans plis chevauchants —, agrégation, puis réajustement `experts_`) ou `'passthrough'`
+    (colonnes de `X` = prévisions d'experts) ; paramètres imbriqués `experts__<nom>__<paramètre>`
+  - séquence jouée par date ; `pooling='global'` : les lignes d'une date forment un tour (mêmes
+    poids), `'per_entity'` : une agrégation par entité plus la globale (poids d'une entité inconnue)
+  - `predict` : poids finaux, jamais mis à jour ; `partial_fit` : lignes postérieures à `last_date_`,
+    experts non réajustés ; attributs `weights_`, `entity_weights_`, `weights_history_`,
+    `oos_predictions_`
+  - coût du mode méta : `n_experts × (n_plis + 1)` ajustements par `fit` ; pour régler l'agrégation
+    seule, passthrough sur `oos_predictions_`
 
 ### `tsforecast/delays/`
 - `data_manager.py` : `compare_and_detect_delays()` — inférence de délais depuis
@@ -209,6 +232,7 @@ celles de l'exécution.
 - Validation robuste de données temporelles et panel ; manipulation de dates et
   périodes
 - Métriques de tracking plates pour MLflow (`tsforecast.tracking`)
+- Agrégation d'experts en ligne BOA / MLpol, séries et panels (`tsforecast.ensemble`)
 
 ### 🚧 À implémenter
 - Agrégation multi-fréquences dédiée (traitée dans un package séparé)
@@ -439,7 +463,7 @@ def validate_temporal_data(
   │   ├── perturbations.py # désordre, noms spéciaux, positions, résolution des dates, ...
   │   └── estimators.py    # SpyEstimator, FailingEstimator, ...
   ├── unit/               # miroir EXACT de tsforecast/ (+ scripts/ : tests de scripts/)
-  │   ├── base/  crossvals/  panel/  tracking/  xy/
+  │   ├── base/  crossvals/  ensemble/  panel/  tracking/  xy/
   │   ├── delays/           # test_calculator.py, test_data_manager.py, ...
   │   ├── imputation/       # high_frequency_imputer/ (paquet) ; _components/ : un test_<module>.py
   │   │                     #   ou un paquet par module de tsforecast/imputation/_components/ ;
@@ -449,7 +473,7 @@ def validate_temporal_data(
   │       └── frequency/     # test_normalizer.py, test_utils.py, test_regularizer.py,
   │                          #   detector/, converter/ et aligner/ (paquets)
   └── integration/
-      ├── crossvals/  delays/  imputation/  pipeline/
+      ├── crossvals/  delays/  ensemble/  imputation/  pipeline/
       └── input_contract/  # entrées jamais modifiées, entrées en lecture seule, libellés str
   ```
 - **Règle de miroir** : `tsforecast/<paquet>/<module>.py` ↔ `tests/unit/<paquet>/test_<module>.py`.

@@ -12,15 +12,20 @@ unit and integration tests. Every case on data that its package handles alone
 carries the native reference of its model; ``sktime_native_cases`` and
 ``darts_native_cases`` add models checked only against their package used
 natively. A third-party package is imported only when an estimator, a parameter
-grid or a native reference is built.
+grid or a native reference is built. ``ensemble_meta_case`` and
+``ensemble_passthrough_case`` check ``tsforecast.ensemble.OnlineAggregator`` with the
+same battery (no third-party package, no native reference).
 """
 from functools import partial
-from typing import Callable, Dict
+from typing import Callable, Dict, Tuple
 
-from sklearn.linear_model import LinearRegression
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.tree import DecisionTreeRegressor
 
 from tests.support import native_references as native
-from tests.support.adapter_contract import AdapterCase, NativeReference, default_splitter
+from tests.support.adapter_contract import AdapterCase, NativeReference, default_data, default_splitter
 from tests.support.datasets import (
     HIERARCHY_LEVELS,
     HIERARCHY_TREE,
@@ -31,6 +36,7 @@ from tests.support.datasets import (
     build_temporal_hierarchy,
 )
 from tsforecast.adapters import DartsAdapter, HierarchicalForecastAdapter, SktimeAdapter
+from tsforecast.ensemble import OnlineAggregator
 
 
 # Fabrique d'une référence native construite à son premier appel
@@ -450,3 +456,75 @@ def darts_native_cases() -> Dict[str, AdapterCase]:
             (0,),
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Agrégation d'experts en ligne (tsforecast.ensemble)
+# ---------------------------------------------------------------------------
+
+# Paramètres refusés au fit par l'agrégateur, quel que soit son mode
+_AGGREGATOR_INVALID_PARAMS = (
+    {'aggregation': 'EWA'},
+    {'loss': 'huber'},
+    {'loss': 'pinball', 'quantile': 1.5},
+    {'pooling': 'local'},
+    {'init_weights': [1.0]},
+    {'loss_gradient': 'yes'},
+)
+
+
+# Fabrique de l'agrégateur méta-estimateur des cas de contrat
+def _meta_aggregator() -> OnlineAggregator:
+    """Meta-estimator over a ridge and a shallow tree, three internal folds."""
+    return OnlineAggregator(
+        [('ridge', Ridge(alpha=1.0)), ('tree', DecisionTreeRegressor(max_depth=2, random_state=0))],
+        cv=3,
+    )
+
+
+# Fonction de construction de prévisions d'experts sur les jeux de la batterie
+def expert_forecast_data(kind: str) -> Tuple[pd.DataFrame, pd.Series]:
+    """Return expert forecasts of the target of a dataset kind of the battery.
+
+    The rows and target are those of :func:`default_data`; the columns are
+    three experts: ``sharp`` (target plus a small noise), ``rough`` (larger
+    noise) and ``biased`` (target plus a constant).
+
+    Args:
+        kind: ``'series'``, ``'panel'`` or ``'unbalanced_panel'``.
+
+    Returns:
+        ``(X, y)``: expert forecasts and target, on the same index.
+    """
+    X, y = default_data(kind)
+    # Bruits des experts, tirés une fois pour toutes les lignes
+    rng = np.random.default_rng(7)
+    noise = rng.standard_normal((len(y), 2))
+    forecasts = pd.DataFrame(
+        {'sharp': y + 0.1 * noise[:, 0], 'rough': y + noise[:, 1], 'biased': y + 2.0},
+        index=X.index,
+    )
+    return forecasts, y
+
+
+# Cas de contrat de l'agrégateur en mode méta-estimateur
+def ensemble_meta_case() -> AdapterCase:
+    """``OnlineAggregator`` as a meta-estimator: ridge and tree experts, nested grid."""
+    return AdapterCase(
+        make_estimator=_meta_aggregator,
+        wrapped_param='experts',
+        param_grid={'aggregation': ['BOA', 'MLpol'], 'experts__ridge__alpha': [0.1, 10.0]},
+        invalid_params=_AGGREGATOR_INVALID_PARAMS + ({'cv': 0},),
+    )
+
+
+# Cas de contrat de l'agrégateur en mode passthrough
+def ensemble_passthrough_case() -> AdapterCase:
+    """``OnlineAggregator`` on precomputed expert forecasts (columns of ``X``)."""
+    return AdapterCase(
+        make_estimator=lambda: OnlineAggregator('passthrough'),
+        wrapped_param='experts',
+        param_grid={'aggregation': ['BOA', 'MLpol'], 'loss': ['mse', 'mae']},
+        invalid_params=_AGGREGATOR_INVALID_PARAMS,
+        make_data=expert_forecast_data,
+    )

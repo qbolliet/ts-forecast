@@ -109,7 +109,8 @@ non réalignée sur `X`. **Réécrit en session 6** (sous-paquet, mode cross-sec
   `check_is_fitted`) ; noms d'algorithmes faux dans la docstring (opera ne connaît que `BOA`,
   `MLpol`, `MLprod`, `FTRL`) ; `Mixture` exige des experts en `pandas.DataFrame` (un `ndarray` lève
   `TypeError`) ; aucun support panel. **Abandonné le 2026-11-26 (AD-18)** : remplacé par une
-  agrégation native, sans dépendance à opera (§ 5.4).
+  agrégation native, sans dépendance à opera (§ 5.4). **Supprimé en session 10** (module, export,
+  extra `adapters-opera`, entrées du `conftest.py` racine et de `test_init.py`).
 
 **Notebook `4 - QB - Adapters.ipynb`**
 - Section 2 : `X = X.shift(-horizon)` sur **tout le panel** (décalage inter-entités) et dans le
@@ -139,7 +140,7 @@ résolution `uv lock` sans changement des versions de `main`) :
 | darts | 0.48.1 | pandas 3 supporté ; **bug connu avec pandas 3.1** (séries journalières → `TypeError`), correctif non publié ; xgboost / statsforecast hors du cœur de darts |
 | hierarchicalforecast | 1.5.3 | roues cp313 ; pas de dépendance à statsforecast |
 | utilsforecast | 0.2.17 | support de pandas 3 à partir de cette version (plancher déclaré dans l'extra) |
-| opera (**abandonné, AD-18**) | commit `9f82033` (`develop`, 2024-11-06) | pur Python, aucune écriture en place sur les entrées ; `scipy` importé non déclaré (déclaré dans l'extra) ; dépôt sans fichier LICENSE (setup.py : MIT) ; plus maintenu depuis 2024 |
+| opera (**abandonné, AD-18 ; retiré des dépendances en session 10**) | commit `9f82033` (`develop`, 2024-11-06) | pur Python, aucune écriture en place sur les entrées ; `scipy` importé non déclaré (déclaré dans l'extra) ; dépôt sans fichier LICENSE (setup.py : MIT) ; plus maintenu depuis 2024 |
 | xgboost | 3.4.1 | groupe `notebooks` |
 | tslearn | 0.10.0 | groupe `notebooks` |
 | statsforecast 2.1.1, mlforecast 1.1.0 | — | exigent `pandas<3` : non installables, non déclarés (aucun usage) |
@@ -165,9 +166,10 @@ covariables. `transformers.AutoModel` n'en couvre aucune de façon uniforme.
   `get_params` / `set_params` (sktime, estimateurs sklearn, réconciliateurs à vérifier). Une
   surcharge n'existe que si l'objet tiers ne les expose pas (darts), et elle doit respecter
   `clone(est).get_params() == est.get_params()` (au sens de `clone`) et le préfixe `<param>__`.
-- Les composites de plusieurs estimateurs (experts de l'agrégation en ligne) héritent de
-  `sklearn.utils.metaestimators._BaseComposition` comme `StackingRegressor`
-  (paramètres imbriqués `experts__<nom>__<param>`).
+- Les composites de plusieurs estimateurs (experts de l'agrégation en ligne) exposent leurs
+  paramètres imbriqués sous la forme `experts__<nom>__<param>` ; `_BaseComposition` les nommerait
+  `<nom>__<param>` (comme `StackingRegressor`) : `OnlineAggregator` surcharge donc `get_params` /
+  `set_params` (AD-22).
 - Attributs ajustés : `n_features_in_`, `feature_names_in_` (quand `X` a des colonnes), plus les
   attributs propres à l'adapter. `check_is_fitted` fonctionne sans attribut posé dans `__init__`.
 - `__sklearn_tags__` surchargé si nécessaire (par exemple `requires_y`, `allow_nan`,
@@ -510,54 +512,77 @@ incomplète.
 ### 5.4 Agrégation d'experts en ligne native (BOA, MLpol)
 
 **Décision du 2026-11-26 (AD-18)** : plus d'`OperaAdapter` ni de dépendance à opera (non publié sur
-PyPI, inactif depuis 2024). Les algorithmes sont implémentés dans `tsforecast` (numpy seul). AgACI
-de MAPIE n'en tient pas lieu : il agrège des bornes d'intervalles d'ACI, pas des prévisions de
-modèles hétérogènes, et MAPIE 1.6.0 ne l'implémente pas (§ 2.3).
+PyPI, inactif depuis 2024). Les algorithmes sont implémentés dans `tsforecast`. AgACI de MAPIE n'en
+tient pas lieu : il agrège des bornes d'intervalles d'ACI, pas des prévisions de modèles hétérogènes,
+et MAPIE 1.6.0 ne l'implémente pas (§ 2.3). **Implémenté en session 10 (AD-22).**
 
-**Emplacement et nom (proposition, à confirmer en plan mode)** : ce n'est pas un adapter (aucun
-paquet tiers) : nouveau sous-paquet `tsforecast/ensemble/`, module `online.py` (estimateur) et
-module privé `_algorithms.py` (mises à jour pures, sans sklearn ni pandas), classe
-`OnlineAggregator(RegressorMixin, BaseEstimator)`. Le notebook des adapters garde la section, puisque
-l'agrégateur combine les prévisions des adapters.
+**Emplacement** : ce n'est pas un adapter (aucun paquet tiers) : sous-paquet `tsforecast/ensemble/`,
+qui réexporte `OnlineAggregator` et `Loss`.
+- `_algorithms.py` : noyau pur, numpy seul. `Loss` / `make_loss` (`"mse"`, `"mae"`, `"pinball"` de
+  niveau `quantile`, ou `Loss(value, gradient)`) ; `excess_losses(weights, experts, y, loss,
+  gradient)` : excès de perte de chaque expert sur le mélange, linéarisé
+  (`loss'(p, y)·(x_k − p)`) ou non (`loss(x_k, y) − loss(p, y)`), **moyenné sur les lignes du tour** ;
+  états figés `BOAState`, `MLpolState` ; registre `ALGORITHMS = {nom: (init, weights, update)}` de
+  fonctions pures `(état, excès) -> état` ; `run(algorithme, état, experts, y, tours, perte, gradient)`.
+  Le même noyau servira à AgACI (perte pinball) sans changement.
+- `online.py` : `OnlineAggregator(RegressorMixin, MetaEstimatorMixin, BaseEstimator)`.
 
-**Algorithmes** (paramètre `aggregation`) :
-- `"BOA"` — Bernstein Online Aggregation (Wintenberger, 2017) : poids exponentiels avec terme de
-  second ordre, taux d'apprentissage adaptatif par expert ; version par gradient de la perte
-  (`loss_gradient=True`, défaut d'opera) et version sur la perte elle-même ;
-- `"MLpol"` — agrégation polynomiale à taux multiples (Gaillard, Stoltz et van Erven, 2014), sans
-  paramètre à régler.
-`MLprod`, `FTRL` et `EWA` hors périmètre (ajout possible plus tard derrière la même interface).
-Les mises à jour sont des fonctions pures `(état, prévisions des experts, observation) -> état`, la
-perte et son gradient étant passés en paramètre (`"mse"`, `"mae"`, `"pinball"` avec un niveau de
-quantile, ou une fonction) : le même noyau servira à AgACI (Q12) sans changement.
+**Algorithmes** (paramètre `aggregation`), fidèles aux articles (choix de l'utilisateur, AD-22) :
+- `"BOA"` — procédure entièrement adaptative de Wintenberger (2017) : `π_k ∝ η_k·exp(−η_k·L_k)·π_0k`
+  (avant le premier tour : `π_0`) ; à chaque tour, étendue `E = 2^(k+1)` avec `2^k ≥ max|ℓ|`,
+  `k ≥ −20` ; `L += ½(ℓ(1 + η_{t−1}ℓ) + E·1{η_{t−1}ℓ > ½})` ; `η = min(1/E, sqrt(log(1/π_0)/Σℓ²))`.
+- `"MLpol"` — Gaillard, Stoltz et van Erven (2014) : `p_k ∝ η_k·(R_k)₊`, regrets `r = −ℓ`, taux à
+  étendue inconnue d'opera R `1/η += r² + B_t² − B_{t−1}²` parti de `1/η = 0` (invariant d'échelle) ;
+  tant qu'aucun regret n'est positif, poids `init_weights` (uniformes par défaut).
+- **Écarts d'opera-python (commit `9f82033`), non reproduits** : BOA avec `E = 2^k`, cumul régularisé
+  avec `η_t` au lieu de `η_{t−1}`, terme correctif `+E·1{ηr > ½}` sur le regret (signe et sens
+  inversés), a priori ignoré (`log(1/K)`), compteurs démarrés à `2^-20` ; MLpol avec `1/η` démarré à
+  `2^20` (dépend de l'échelle de `y`). Écart mesuré sur le jeu de référence (8 tours, 3 experts) :
+  jusqu'à 0,20 sur un poids et 0,13 sur une prévision pour BOA.
 
-**Rôle et modes** :
-1. **méta-estimateur** (par défaut) : `experts=[("ridge", Ridge()), ("rf", RandomForestRegressor())]`
-   (`_BaseComposition`). `fit` :
-   1. produit des prévisions **hors échantillon** des experts sur l'entraînement, avec un splitter
-      temporel interne (paramètre `cv`, splitter de `tsforecast` ; jamais de prévisions *in-sample*,
-      qui biaiseraient les poids vers l'expert qui sur-apprend) ;
-   2. fait tourner l'agrégation séquentiellement, lignes triées par date, sur ces prévisions ;
-   3. réajuste chaque expert sur tout l'entraînement (`experts_`).
-   `predict` combine les prévisions des experts réajustés avec les **poids finaux** (`y` est inconnu
-   au `predict` : aucune mise à jour).
-2. **`experts="passthrough"`** : les colonnes de `X` sont déjà des prévisions d'experts (produites
-   par d'autres adapters ou par `cross_validate(..., return_estimator=True, return_indices=True)`).
+**Modes** :
+1. **méta-estimateur** : `experts=[("ridge", Ridge()), ...]`, paramètres imbriqués
+   `experts__<nom>__<param>` (et `experts__<nom>` pour remplacer un expert). `fit` :
+   1. prévisions **hors échantillon** des experts (un clone par couple expert × pli, `joblib`
+      `n_jobs`). `cv` entier (défaut 5) : les `cv` derniers blocs de `n_dates // (cv + 1)` dates
+      consécutives, communs aux entités, chacun prévu par des experts ajustés sur toutes les dates
+      antérieures (fenêtre croissante, sans gap) — un splitter de panel de `tsforecast` compte
+      `test_size` en lignes par entité, ses plis se chevauchent dès qu'il y a des trous. Ou un
+      splitter fourni (lignes présentées triées entité puis date ; plis chevauchants → `ValueError`) ;
+      les lignes de la première fenêtre ne sont pas agrégées ;
+   2. agrégation séquentielle dans l'ordre des dates ;
+   3. réajustement des experts sur tout l'entraînement (`experts_`).
+2. **`experts="passthrough"`** : les colonnes de `X` sont des prévisions d'experts ; toutes les lignes
+   sont agrégées.
 
-- Paramètres : `aggregation`, `loss`, `loss_gradient`, `quantile` (perte pinball), `init_weights`
-  (`"uniform"` ou tableau) ; validés au `fit`.
-- Panel : `pooling="global"` (une seule agrégation, lignes ordonnées par date puis entité ; les
-  lignes d'une même date sont-elles agrégées ensemble ou l'une après l'autre : à trancher en plan
-  mode) ou `"per_entity"` (une agrégation par entité ; entité inconnue au `predict` → poids globaux
-  si disponibles, sinon erreur explicite).
-- Attributs : `weights_` (poids finaux, par entité en mode `per_entity`), `weights_history_`
-  (`DataFrame` indexé comme les lignes d'entraînement, une colonne par expert).
-- `partial_fit(X, y)` : poursuit la séquence (nouvelles lignes postérieures aux précédentes).
-- Vérification : valeurs de référence calculées **une fois** avec opera (commit `9f82033`, installé
-  dans un environnement jetable hors du dépôt) sur de petits jeux déterministes et recopiées en
-  littéraux dans les tests ; aucun test n'importe opera. Propriétés théoriques testées aussi
-  (poids sur le simplexe, convergence vers le meilleur expert, regret borné sur un jeu adverse
-  simple).
+- **Tours par date** : en `pooling="global"`, les lignes d'une même date forment un tour (mêmes poids,
+  excès de perte moyen) : traiter A puis B ferait lire `y_A(t+h)` pour pondérer B à la même origine ;
+  le résultat ne dépend pas de l'ordre des entités. `"per_entity"` : une agrégation par entité, plus
+  la globale, toujours tenue, dont les poids prévoient une entité inconnue. Sur une série, les deux
+  sont identiques (pas d'`entity_weights_`).
+- `predict` : poids finaux, jamais mis à jour ; `ndarray` dans l'ordre des lignes de `X`.
+- `partial_fit(X, y)` : `fit` si non ajusté ; sinon lignes toutes postérieures à `last_date_` (règle
+  globale, y compris en `per_entity` : l'agrégation globale reste chronologique), experts non
+  réajustés, entité nouvelle partie de l'état initial ; `fit(A)` puis `partial_fit(B)` en passthrough
+  = `fit(A ∪ B)` (testé) ; algorithme changé depuis `fit` → `ValueError`.
+- Attributs : `weights_` (`Series` globale), `entity_weights_` (`DataFrame` entité × expert, per_entity
+  sur un panel), `weights_history_` (poids de chaque ligne agrégée avant sa cible, ordre
+  chronologique), `oos_predictions_` (méta), `experts_`, `expert_names_`, `prior_`, `state_`,
+  `entity_states_`, `entity_names_`, `last_date_` (unité de l'entrée).
+- **Coût** : `n_experts × (n_plis + 1)` ajustements par `fit` en mode méta, × plis externes en
+  validation croisée, × candidats en `GridSearchCV` (3 experts, `cv=5`, 5 plis, 10 candidats : 900).
+  Moyens : moins de plis internes, `max_train_size` d'un splitter fourni, `n_jobs`, et pour régler
+  l'agrégation seule, passthrough sur `oos_predictions_` (aucun réajustement ; même résultat, testé).
+- **Fuite** : les poids finaux ne lisent que des cibles d'entraînement ; avec `h > 1`, l'historique
+  interne des poids est un chemin en ligne idéalisé (documenté).
+- **Vérification** : valeurs de référence calculées une fois avec opera-python dans un environnement
+  jetable du scratchpad, recopiées en littéraux dans `tests/unit/ensemble/test__algorithms.py` (BOA
+  et MLpol × `mse` / `mae` × avec / sans gradient, 8 tours, 3 experts) : MLpol par opera tel quel,
+  l'état initial d'opera (`1/η = 2^20`) injecté dans le noyau ; BOA par une copie d'opera corrigée des
+  trois lignes ci-dessus, `η_0 = Σℓ²_0 = 2^-20` injectés ; écart ≤ 1e-14 en relatif. Propriétés :
+  tours calculés à la main, simplexe, invariance d'échelle, pinball(0,5) ≡ mae, convergence vers
+  l'expert dominant, regret moyen décroissant sur une séquence alternée. Batterie de contrat (deux
+  cas, `native_reference=None` : les littéraux en tiennent lieu).
 
 ### 5.5 Modèles de fondation (Hugging Face) : `FoundationModelAdapter`
 
@@ -648,8 +673,9 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
   `adapters-hierarchical`, `adapters-chronos`, `adapters-timestral`, `adapters-t0`, et
   `adapters-all` (liste sans espace) ; `adapters-autogluon` plus tard (§ 5.6). Bornes `>=x,<y`
   comme le reste du `pyproject.toml` ; dépendances Git figées sur un SHA
-  (`allow-direct-references = true`). L'extra `adapters-opera` disparaît avec l'agrégation native
-  (AD-18), qui n'a aucune dépendance hors du cœur.
+  (`allow-direct-references = true`, retiré en session 10 avec la seule dépendance Git, à remettre
+  pour timestral). L'extra `adapters-opera` est supprimé (session 10) : l'agrégation native
+  (AD-18, AD-22) n'a aucune dépendance hors du cœur ; `uv.lock` régénéré sans opera.
 - Groupe `notebooks` (hors `default-groups`) : `xgboost`, `tslearn`, `statsforecast` /
   `mlforecast` si le notebook en a besoin, plus les extras d'adapters. `dev` et `docs` restent ceux
   de `main` (ne pas retirer `docs` de `default-groups`).
@@ -789,7 +815,7 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 | Q1 | Rattrapage de `main` : `merge` ou `rebase` ? | **Tranchée (AD-04)** : `git merge --no-commit --no-ff main` |
 | Q2 | Renommer le notebook selon la numérotation de `main` (`5 - Adapters.ipynb`) ? | Garder le nom actuel jusqu'à la fin, renommer en dernière session |
 | Q3 | Paquet tiers incompatible avec pandas 3 / Python 3.13 | **Tranchée (AD-05, AD-06)** : tous compatibles ; aucun plafond ajouté au cœur ; bug pandas 3.1 de darts documenté |
-| Q4 | opera incompatible ou abandonné | **Tranchée (AD-07, puis AD-18)** : SHA figé en session 1 ; abandonné le 2026-11-26 au profit d'une agrégation native BOA / MLpol (§ 5.4), opera ne servant plus qu'à calculer une fois des valeurs de référence des tests |
+| Q4 | opera incompatible ou abandonné | **Tranchée (AD-07, puis AD-18)** : SHA figé en session 1 ; abandonné le 2026-11-26 au profit d'une agrégation native BOA / MLpol (§ 5.4), opera ne servant plus qu'à calculer une fois des valeurs de référence des tests ; fait en session 10 (AD-22) |
 | Q5 | `HierarchicalForecastAdapter` : `reconciler` (singulier) seul, ou aussi `reconcilers` (liste) ? | **Tranchée (AD-13)** : `reconciler` seul ; `reconcile(X, reconcilers=None)` pour comparer |
 | Q6 | Étiquette des lignes d'agrégat (`""`, `"Total"`, `"__all__"`) | **Tranchée (AD-13)** : `"Total"` (paramètre `aggregate_label`) |
 | Q7 | Ancrage temporel des agrégats (début de période / période cible) | **Tranchée (AD-13)** : selon la position de la grille fine (`S` → début, `E` → fin) ; ancrage sur les origines documenté |
@@ -827,4 +853,5 @@ Points de conception connus, à trancher en plan mode à ce moment (Q13) :
 | AD-19 | 2026-11-26 | planification | `AutoGluonAdapter` ajouté au périmètre mais reporté (sessions A1–A2 hors séquence) jusqu'à une version d'AutoGluon acceptant pandas 3 | AutoGluon 1.6.3 et `master` déclarent `pandas>=2.0,<2.4` : non installable avec `pandas>=3` |
 | AD-20 | 2026-11-26 | planification | Règle 11 de la batterie de contrat (équivalence au paquet natif, champ `AdapterCase.native_reference`) ; session dédiée insérée juste après la session 8, avant l'agrégation native et les modèles de fondation | Seule preuve que l'adapter ne change pas le modèle (horizon, covariables, ordre) ; l'infrastructure existe ainsi avant que les adapters suivants ne s'y branchent, et un défaut trouvé sur sktime, darts ou hierarchicalforecast est corrigé avant les notebooks et la documentation suivants |
 | AD-21 | 2026-11-26 | 9 | Règle 11 : `native_reference(X_train, y_train, X_test, fh)` (horizon relatif fourni par la batterie, écart à la signature `(X_train, y_train, X_test)` prévue) et `native_gaps` ; série et panel équilibré, gaps 0 et 2, 3 dates de test, tolérances inchangées des cas ; modèles hors batterie dans des classes `TestNativeEquivalence` ; références hiérarchiques par copie, `S_df` de l'arbre écrit à la main, cross-temporel natif = deux passes enchaînées | Une référence qui déduirait l'horizon des dates refait le calcul de l'adapter au lieu de le contrôler ; SARIMAX et les modèles darts à covariables ne passent pas les règles à gap (X absent du gap), d'où une comparaison seule ; `aggregate` ne sait pas construire l'arbre des jeux ; hierarchicalforecast n'a pas de réconciliation cross-temporelle ; aucun écart trouvé, aucun adapter corrigé |
+| AD-22 | 2026-11-27 | 10 | Sous-paquet `tsforecast/ensemble/` (`_algorithms.py` noyau numpy pur, `online.py`), `OnlineAggregator` et `Loss` exportés ; algorithmes **fidèles aux articles** (BOA : figure de la procédure adaptative de Wintenberger, a priori `π_0`, `c = 20` ; MLpol : taux d'opera R parti de `1/η = 0`) et non à opera-python ; tours par date en `global` (excès de perte moyen) ; `per_entity` tient aussi l'agrégation globale (entité inconnue) ; `weights_` (`Series` globale) et `entity_weights_` (`DataFrame`) séparés ; `init_weights` = a priori de BOA, poids de repli de MLpol ; `cv` entier = blocs de dates communs ; paramètres imbriqués `experts__<nom>__<param>` par `get_params` / `set_params` surchargés (`MetaEstimatorMixin` au lieu de `_BaseComposition`) ; `partial_fit` exige des lignes postérieures à toutes les lignes agrégées ; littéraux de référence d'opera (MLpol tel quel, BOA corrigé) avec injection de l'état initial d'opera | opera-python s'écarte de la figure de BOA sur trois lignes et rend MLpol dépendant de l'échelle (`1/η_0 = 2^20`) ; traiter séparément les entités d'une même date lirait des cibles inconnues en temps réel ; un attribut dont le type dépend d'un paramètre gêne l'utilisateur ; `_BaseComposition` nomme `<nom>__<param>`, le prompt exige `experts__ridge__alpha` ; un splitter de panel compte `test_size` en lignes par entité, ses plis se chevauchent sur des données trouées (`DropNaNTarget`) ; une règle globale de postériorité garde l'agrégation globale chronologique |
 |  |  |  |  |  |
